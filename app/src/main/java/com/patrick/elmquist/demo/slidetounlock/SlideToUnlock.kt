@@ -1,10 +1,16 @@
-@file:OptIn(ExperimentalMaterialApi::class)
-
 package com.patrick.elmquist.demo.slidetounlock
 
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.rememberSplineBasedDecay
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.AnchoredDraggableDefaults.flingBehavior
+import androidx.compose.foundation.gestures.AnchoredDraggableState
+import androidx.compose.foundation.gestures.DraggableAnchors
 import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.anchoredDraggable
+import androidx.compose.foundation.gestures.animateTo
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Arrangement.Absolute.spacedBy
 import androidx.compose.foundation.layout.Box
@@ -24,15 +30,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.ButtonDefaults
-import androidx.compose.material.ExperimentalMaterialApi
-import androidx.compose.material.FractionalThreshold
-import androidx.compose.material.OutlinedButton
-import androidx.compose.material.SwipeProgress
-import androidx.compose.material.SwipeableDefaults
-import androidx.compose.material.SwipeableState
-import androidx.compose.material.rememberSwipeableState
-import androidx.compose.material.swipeable
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -67,19 +65,26 @@ fun SlideToUnlock(
     modifier: Modifier = Modifier,
 ) {
     val hapticFeedback = LocalHapticFeedback.current
-    val swipeState = rememberSwipeableState(
-        initialValue = if (isLoading) Anchor.End else Anchor.Start,
-        confirmStateChange = { anchor ->
-            if (anchor == Anchor.End) {
-                hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                onUnlockRequested()
-            }
-            true
-        }
-    )
+    val decayAnimationSpec = rememberSplineBasedDecay<Float>()
+    val swipeState = remember {
+        AnchoredDraggableState(
+            initialValue = if (!isLoading) Anchor.Start else Anchor.End,
+            confirmValueChange = { anchor ->
+                if (anchor == Anchor.End) {
+                    hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onUnlockRequested()
+                }
+                true
+            },
+//            positionalThreshold = { d -> d * 1f },
+//            velocityThreshold = { Float.POSITIVE_INFINITY },
+//            snapAnimationSpec = tween(),
+//            decayAnimationSpec = decayAnimationSpec,
+        )
+    }
 
     val swipeFraction by remember {
-        derivedStateOf { calculateSwipeFraction(swipeState.progress) }
+        derivedStateOf { calculateSwipeFraction(swipeState) }
     }
 
     LaunchedEffect(isLoading) {
@@ -103,50 +108,39 @@ fun SlideToUnlock(
         Thumb(
             isLoading = isLoading,
             modifier = Modifier.offset {
-                IntOffset(swipeState.offset.value.roundToInt(), 0)
+                IntOffset((swipeState.offset.takeIf { !it.isNaN() } ?: 0f).roundToInt(), 0)
             },
         )
     }
 }
 
-fun calculateSwipeFraction(progress: SwipeProgress<Anchor>): Float {
-    val atAnchor = progress.from == progress.to
-    val fromStart = progress.from == Anchor.Start
-    return if (atAnchor) {
-        if (fromStart) 0f else 1f
-    } else {
-        if (fromStart) progress.fraction else 1f - progress.fraction
-    }
+private fun calculateSwipeFraction(state: AnchoredDraggableState<Anchor>): Float {
+    val progress = state.progress
+    val atAnchor = state.settledValue == state.targetValue
+    val fromStart = state.settledValue == Anchor.Start
+//    val swipeFraction = if (atAnchor) {
+//        if (fromStart) progress else 1f - progress
+//    } else {
+//        if (fromStart) progress else 1f - progress
+//    }
+    val swipeFraction = progress
+    println("==== swipeFraction = $swipeFraction, atAnchor = $atAnchor, from = ${state.settledValue}, to = ${state.targetValue}")
+    return swipeFraction
 }
 
 enum class Anchor { Start, End }
 
 @Composable
 fun Track(
-    swipeState: SwipeableState<Anchor>,
+    swipeState: AnchoredDraggableState<Anchor>,
     swipeFraction: Float,
     enabled: Boolean,
     modifier: Modifier = Modifier,
     content: @Composable (BoxScope.() -> Unit),
 ) {
     val density = LocalDensity.current
-    var fullWidth by remember { mutableIntStateOf(0) }
-
+    val thumbSize = Thumb.Size
     val horizontalPadding = 10.dp
-
-    val startOfTrackPx = 0f
-    val endOfTrackPx = remember(fullWidth) {
-        with(density) { fullWidth - (2 * horizontalPadding + Thumb.Size).toPx() }
-    }
-
-    val snapThreshold = 0.8f
-    val thresholds = { from: Anchor, _: Anchor ->
-        if (from == Anchor.Start) {
-            FractionalThreshold(snapThreshold)
-        } else {
-            FractionalThreshold(1f - snapThreshold)
-        }
-    }
 
     val backgroundColor by remember(swipeFraction) {
         derivedStateOf { calculateTrackColor(swipeFraction) }
@@ -154,19 +148,28 @@ fun Track(
 
     Box(
         modifier = modifier
-            .onSizeChanged { fullWidth = it.width }
+            .onSizeChanged {
+                val fullWidth = it.width
+                val startOfTrackPx = 0f
+                val endOfTrackPx =
+                    with(density) { fullWidth - (2 * horizontalPadding + thumbSize).toPx() }
+                swipeState.updateAnchors(
+                    DraggableAnchors {
+                        Anchor.Start at startOfTrackPx
+                        Anchor.End at endOfTrackPx
+                    }
+                )
+            }
             .height(56.dp)
             .fillMaxWidth()
-            .swipeable(
+            .anchoredDraggable(
                 enabled = enabled,
                 state = swipeState,
                 orientation = Orientation.Horizontal,
-                anchors = mapOf(
-                    startOfTrackPx to Anchor.Start,
-                    endOfTrackPx to Anchor.End,
+                flingBehavior = flingBehavior(
+                    state = swipeState,
+                    positionalThreshold = { d -> d * 1f },
                 ),
-                thresholds = thresholds,
-                velocityThreshold = Track.VelocityThreshold,
             )
             .background(
                 color = backgroundColor,
@@ -245,10 +248,6 @@ private object Thumb {
     val Size = 40.dp
 }
 
-private object Track {
-    val VelocityThreshold = SwipeableDefaults.VelocityThreshold * 10
-}
-
 @Preview
 @Composable
 private fun Preview() {
@@ -294,7 +293,7 @@ private fun Preview() {
 
             Text(text = "Inactive")
             Track(
-                swipeState = SwipeableState(Anchor.Start),
+                swipeState = AnchoredDraggableState(Anchor.Start),
                 swipeFraction = 0f,
                 enabled = true,
                 modifier = Modifier.fillMaxWidth(),
@@ -303,7 +302,7 @@ private fun Preview() {
             Spacer(modifier = Modifier.height(8.dp))
             Text(text = "Active")
             Track(
-                swipeState = SwipeableState(Anchor.Start),
+                swipeState = AnchoredDraggableState(Anchor.Start),
                 swipeFraction = 1f,
                 enabled = true,
                 modifier = Modifier.fillMaxWidth(),
@@ -319,8 +318,7 @@ private fun Preview() {
                 onUnlockRequested = { isLoading = true },
             )
             Spacer(modifier = Modifier.weight(1f))
-            OutlinedButton(
-                colors = ButtonDefaults.outlinedButtonColors(),
+            Button(
                 shape = RoundedCornerShape(percent = 50),
                 onClick = { isLoading = false }) {
                 Text(text = "Cancel loading", style = MaterialTheme.typography.labelMedium)
